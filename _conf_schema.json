@@ -2,12 +2,12 @@
   "default_provider_id": {
     "description": "默认服务商 ID。留空时使用 providers 的第一个。",
     "type": "string",
-    "default": "veo"
+    "default": ""
   },
   "request_timeout_seconds": {
     "description": "单次 HTTP 请求超时时间（秒）",
     "type": "int",
-    "default": 45
+    "default": 60
   },
   "poll_interval_seconds": {
     "description": "轮询间隔（秒）",
@@ -23,6 +23,26 @@
     "description": "LLM 工具 video_generate 在 wait=true 时的最长等待秒数，避免触发 Agent 工具超时（默认 60 秒）。",
     "type": "int",
     "default": 10
+  },
+  "local_video_cache_ttl_seconds": {
+    "description": "视频本地缓存保留时长（秒），发送成功后延时删除",
+    "type": "int",
+    "default": 300
+  },
+  "local_video_download_timeout_seconds": {
+    "description": "下载视频到本地缓存的单次超时（秒）",
+    "type": "int",
+    "default": 180
+  },
+  "local_video_download_retry_times": {
+    "description": "下载视频失败时重试次数（总尝试次数 = 1 + 重试次数）",
+    "type": "int",
+    "default": 2
+  },
+  "local_video_cleanup_interval_seconds": {
+    "description": "本地视频缓存后台清理轮询间隔（秒）",
+    "type": "int",
+    "default": 60
   },
   "debug_mode": {
     "description": "调试模式开关。开启后将在日志中输出 HTTP 请求/响应详情、轮询过程等调试信息，排查接入问题时使用，正常运行时建议关闭。",

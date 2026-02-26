@@ -17,7 +17,7 @@
   - `video_query_status(task_id)`
   - `video_test_connection(provider_id)`
 - 结果输出：
-  - 成功：发送视频组件（可用时）+ 文本
+  - 成功：优先下载到本地缓存并发送本地视频文件（失败时回退 URL）+ 文本
   - 失败：返回错误状态与错误详情
   - 超时：提示继续用 `status` 查询
 
@@ -49,6 +49,12 @@
 如果某服务商不是 OpenAI 兼容格式，只要它具备“提交 + 查询”能力，也可以通过路径映射接入。
 
 说明：`video_generate` 的 `wait` 默认建议为 `false`。若传 `true`，将受 `llm_wait_timeout_seconds`（默认 10 秒）限制，超时后请用 `video_query_status` 继续查询。
+
+本地缓存发送相关配置（可选）：
+- `local_video_cache_ttl_seconds`：发送成功后本地缓存文件延时删除秒数，默认 `300`
+- `local_video_download_timeout_seconds`：下载到本地缓存的单次超时秒数，默认 `180`
+- `local_video_download_retry_times`：下载失败重试次数，默认 `2`
+- `local_video_cleanup_interval_seconds`：后台清理轮询间隔秒数，默认 `60`
 
 ## 依赖
 

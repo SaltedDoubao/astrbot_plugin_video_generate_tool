@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import uuid
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlparse
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 
 try:
     # AstrBot 常见加载方式：package.module（需要相对导入）
@@ -33,12 +37,20 @@ class VideoGenerateToolPlugin(Star):
         super().__init__(context)
         self.config = config or {}
         self._debug = bool(self._cfg_get("debug_mode", False))
+        self._video_cache_dir = self._prepare_video_cache_dir()
+        self._cache_cleanup_task: asyncio.Task[None] | None = None
+        self._pending_delete_tasks: set[asyncio.Task[None]] = set()
         self._task_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._providers = self._load_providers()
         timeout = float(self._cfg_get("request_timeout_seconds", 45))
         self._client = VideoApiClient(timeout_seconds=max(timeout, 5.0), debug=self._debug)
 
     async def initialize(self):
+        await self._cleanup_expired_cache_files()
+        cleanup_interval = max(int(self._cfg_get("local_video_cleanup_interval_seconds", 60)), 1)
+        self._cache_cleanup_task = asyncio.create_task(
+            self._cache_cleanup_loop(cleanup_interval)
+        )
         logger.info(
             f"[video_generate_tool] 插件已加载，已配置服务商数量: {len(self._providers)}"
         )
@@ -108,11 +120,15 @@ class VideoGenerateToolPlugin(Star):
                 f"视频生成完成: provider={provider.provider_id}, "
                 f"task_id={final_snapshot.task_id}, status={final_snapshot.status}"
             )
-            chain_result = self._video_chain_result(event, text, final_snapshot.video_url)
+            chain_result = await self._send_video_with_local_cache(event, text, final_snapshot)
             if chain_result is not None:
                 yield chain_result
             else:
-                yield event.plain_result(f"{text}\n视频地址: {final_snapshot.video_url}")
+                fallback = self._video_chain_result(event, text, final_snapshot.video_url)
+                if fallback is not None:
+                    yield fallback
+                else:
+                    yield event.plain_result(f"{text}\n视频地址: {final_snapshot.video_url}")
             return
 
         yield event.plain_result(
@@ -159,11 +175,15 @@ class VideoGenerateToolPlugin(Star):
                 f"任务已完成: provider={provider.provider_id}, "
                 f"task_id={latest.task_id}, status={latest.status}"
             )
-            chain_result = self._video_chain_result(event, text, latest.video_url)
+            chain_result = await self._send_video_with_local_cache(event, text, latest)
             if chain_result is not None:
                 yield chain_result
             else:
-                yield event.plain_result(f"{text}\n视频地址: {latest.video_url}")
+                fallback = self._video_chain_result(event, text, latest.video_url)
+                if fallback is not None:
+                    yield fallback
+                else:
+                    yield event.plain_result(f"{text}\n视频地址: {latest.video_url}")
             return
 
         detail = f"任务状态: provider={provider.provider_id}, task_id={latest.task_id}, status={latest.status}"
@@ -291,6 +311,7 @@ class VideoGenerateToolPlugin(Star):
         )
 
     async def terminate(self):
+        await self._cancel_cleanup_tasks()
         await self._client.close()
         logger.info("[video_generate_tool] 插件已卸载。")
 
@@ -386,6 +407,130 @@ class VideoGenerateToolPlugin(Star):
         except Exception as exc:
             logger.warning(f"发送视频组件失败，将回退到纯文本 URL: {exc}")
             return None
+
+    async def _send_video_with_local_cache(
+        self, event: AstrMessageEvent, text: str, snapshot: TaskSnapshot
+    ) -> MessageEventResult | None:
+        local_path = await self._download_video_with_retries(snapshot)
+        if local_path is None:
+            return None
+        try:
+            result = event.chain_result(
+                [Comp.Plain(text), Comp.Video.fromFileSystem(str(local_path))]
+            )
+        except Exception as exc:
+            logger.warning(f"发送本地视频失败，将回退到 URL: {exc}")
+            self._remove_file_safely(local_path)
+            return None
+        self._schedule_cached_file_delete(local_path)
+        return result
+
+    async def _download_video_with_retries(self, snapshot: TaskSnapshot) -> Path | None:
+        video_url = snapshot.video_url.strip()
+        if not video_url:
+            return None
+        retry_times = max(int(self._cfg_get("local_video_download_retry_times", 2)), 0)
+        timeout_seconds = max(
+            float(self._cfg_get("local_video_download_timeout_seconds", 180)), 5.0
+        )
+        total_attempts = retry_times + 1
+        for attempt in range(total_attempts):
+            target_path = self._build_local_video_cache_path(
+                snapshot.provider_id, snapshot.task_id, video_url
+            )
+            try:
+                await self._client.download_video_to_file(
+                    video_url=video_url,
+                    dst_path=str(target_path),
+                    timeout_seconds=timeout_seconds,
+                )
+                return target_path
+            except VideoApiError as exc:
+                logger.warning(
+                    f"下载视频失败 (attempt={attempt + 1}/{total_attempts}): {exc}"
+                )
+                self._remove_file_safely(target_path)
+                if attempt < total_attempts - 1:
+                    await asyncio.sleep(1)
+        return None
+
+    def _build_local_video_cache_path(
+        self, provider_id: str, task_id: str, video_url: str
+    ) -> Path:
+        provider_part = re.sub(r"[^0-9a-zA-Z_-]", "_", provider_id or "provider")
+        task_part = re.sub(r"[^0-9a-zA-Z_-]", "_", task_id or "task")
+        suffix = ".mp4"
+        parsed_path = urlparse(video_url).path
+        ext = Path(parsed_path).suffix.lower()
+        if ext and len(ext) <= 10 and ext[1:].isalnum():
+            suffix = ext
+        ts = int(time.time() * 1000)
+        rand = uuid.uuid4().hex[:8]
+        filename = f"{provider_part}_{task_part}_{ts}_{rand}{suffix}"
+        return self._video_cache_dir / filename
+
+    def _schedule_cached_file_delete(self, path: Path) -> None:
+        ttl_seconds = max(int(self._cfg_get("local_video_cache_ttl_seconds", 300)), 1)
+        task = asyncio.create_task(self._delete_cached_file_later(path, ttl_seconds))
+        self._pending_delete_tasks.add(task)
+        task.add_done_callback(self._pending_delete_tasks.discard)
+
+    async def _delete_cached_file_later(self, path: Path, ttl_seconds: int) -> None:
+        try:
+            await asyncio.sleep(ttl_seconds)
+        except asyncio.CancelledError:
+            return
+        self._remove_file_safely(path)
+
+    def _remove_file_safely(self, path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning(f"删除缓存文件失败: path={path}, err={exc}")
+
+    def _prepare_video_cache_dir(self) -> Path:
+        try:
+            base_dir = Path(StarTools.get_data_dir())
+        except Exception as exc:
+            logger.warning(f"获取插件数据目录失败，将回退当前目录: {exc}")
+            base_dir = Path.cwd()
+        cache_dir = base_dir / "video_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    async def _cleanup_expired_cache_files(self) -> None:
+        ttl_seconds = max(int(self._cfg_get("local_video_cache_ttl_seconds", 300)), 1)
+        now = time.time()
+        removed_count = 0
+        for file_path in self._video_cache_dir.glob("*"):
+            if not file_path.is_file():
+                continue
+            try:
+                if now - file_path.stat().st_mtime >= ttl_seconds:
+                    file_path.unlink(missing_ok=True)
+                    removed_count += 1
+            except OSError as exc:
+                logger.warning(f"清理缓存文件失败: path={file_path}, err={exc}")
+        if removed_count and self._debug:
+            self._debug_log(f"已清理过期缓存文件数量: {removed_count}")
+
+    async def _cache_cleanup_loop(self, interval_seconds: int) -> None:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            await self._cleanup_expired_cache_files()
+
+    async def _cancel_cleanup_tasks(self) -> None:
+        tasks: list[asyncio.Task[Any]] = []
+        if self._cache_cleanup_task is not None:
+            self._cache_cleanup_task.cancel()
+            tasks.append(self._cache_cleanup_task)
+            self._cache_cleanup_task = None
+        for task in list(self._pending_delete_tasks):
+            task.cancel()
+            tasks.append(task)
+        self._pending_delete_tasks.clear()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _resolve_provider(self, provider_id: str) -> ProviderConfig | None:
         provider_id = provider_id.strip()

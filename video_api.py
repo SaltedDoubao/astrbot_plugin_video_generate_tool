@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
 
@@ -187,6 +189,42 @@ class VideoApiClient:
             f"video_url={'(有)' if snapshot.video_url else '(无)'}"
         )
         return snapshot
+
+    async def download_video_to_file(
+        self, video_url: str, dst_path: str, timeout_seconds: float
+    ) -> None:
+        target = Path(dst_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = target.with_suffix(f"{target.suffix}.part")
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+        timeout = httpx.Timeout(connect=10.0, read=max(timeout_seconds, 5.0), write=30.0, pool=10.0)
+        try:
+            async with self._http_client.stream(
+                "GET",
+                video_url,
+                headers={},
+                timeout=timeout,
+            ) as resp:
+                if resp.status_code >= 400:
+                    text = (await resp.aread()).decode(errors="ignore")[:300]
+                    raise VideoApiError(
+                        f"下载视频失败: HTTP {resp.status_code}, detail={text or '无'}"
+                    )
+                with open(tmp_path, "wb") as fp:
+                    async for chunk in resp.aiter_bytes():
+                        if chunk:
+                            fp.write(chunk)
+            os.replace(tmp_path, target)
+        except httpx.HTTPError as exc:
+            raise VideoApiError(f"下载视频失败: {exc}") from exc
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def _snapshot_from_payload(
         self, provider: ProviderConfig, payload: Mapping[str, Any], fallback_task_id: str = ""
