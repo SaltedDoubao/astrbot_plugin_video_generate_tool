@@ -1,0 +1,124 @@
+{
+  "default_provider_id": {
+    "description": "默认服务商 ID。留空时使用 providers 的第一个。",
+    "type": "string",
+    "default": "veo"
+  },
+  "request_timeout_seconds": {
+    "description": "单次 HTTP 请求超时时间（秒）",
+    "type": "int",
+    "default": 45
+  },
+  "poll_interval_seconds": {
+    "description": "轮询间隔（秒）",
+    "type": "int",
+    "default": 6
+  },
+  "max_poll_attempts": {
+    "description": "轮询最大次数",
+    "type": "int",
+    "default": 20
+  },
+  "providers": {
+    "description": "视频 API 服务商列表（支持 veo/sora/grok/seedance 等任何可映射接口）",
+    "type": "template_list",
+    "templates": {
+      "openai_compatible_video": {
+        "name": "OpenAI-Compatible Video API",
+        "hint": "默认适配：先提交任务，再按 task_id 查询状态。",
+        "items": {
+          "provider_id": {
+            "description": "服务商唯一 ID，例如 veo/sora/grok/seedance",
+            "type": "string",
+            "default": "veo"
+          },
+          "base_url": {
+            "description": "服务商 API 基础地址，例如 https://api.example.com",
+            "type": "string",
+            "default": ""
+          },
+          "api_key": {
+            "description": "API Key（默认按 Authorization: Bearer 注入）",
+            "type": "string",
+            "default": ""
+          },
+          "model": {
+            "description": "默认模型，例如 veo-3 / sora-2",
+            "type": "string",
+            "default": ""
+          },
+          "submit_method": {
+            "description": "提交任务 HTTP 方法",
+            "type": "string",
+            "default": "POST"
+          },
+          "submit_path": {
+            "description": "提交任务路径",
+            "type": "string",
+            "default": "/v1/video/generations"
+          },
+          "status_method": {
+            "description": "查任务状态 HTTP 方法",
+            "type": "string",
+            "default": "GET"
+          },
+          "status_path_template": {
+            "description": "状态查询路径模板，使用 {task_id} 占位",
+            "type": "string",
+            "default": "/v1/video/generations/{task_id}"
+          },
+          "prompt_field": {
+            "description": "提示词字段名",
+            "type": "string",
+            "default": "prompt"
+          },
+          "model_field": {
+            "description": "模型字段名",
+            "type": "string",
+            "default": "model"
+          },
+          "task_id_field": {
+            "description": "响应中的任务 ID 路径（支持 output[0].id）",
+            "type": "string",
+            "default": "id"
+          },
+          "status_field": {
+            "description": "响应中的状态字段路径",
+            "type": "string",
+            "default": "status"
+          },
+          "output_url_field": {
+            "description": "响应中视频 URL 路径",
+            "type": "string",
+            "default": "output[0].url"
+          },
+          "error_field": {
+            "description": "响应中错误信息路径",
+            "type": "string",
+            "default": "error.message"
+          },
+          "done_values": {
+            "description": "完成状态（逗号分隔）",
+            "type": "string",
+            "default": "succeeded,completed,success,done,finished"
+          },
+          "failed_values": {
+            "description": "失败状态（逗号分隔）",
+            "type": "string",
+            "default": "failed,error,cancelled,canceled,rejected"
+          },
+          "extra_headers_json": {
+            "description": "额外请求头（JSON 对象字符串）",
+            "type": "string",
+            "default": "{}"
+          },
+          "extra_body_json": {
+            "description": "每次提交都附加的请求体字段（JSON 对象字符串）",
+            "type": "string",
+            "default": "{}"
+          }
+        }
+      }
+    }
+  }
+}

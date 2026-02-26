@@ -1,0 +1,6 @@
+name: astrbot_plugin_video_generate_tool # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
+display_name: Video Generate Tool # 用于展示的名字
+desc: 调用多视频生成 API（veo/sora/grok/seedance 等）并输出到 QQ，同时暴露 AI 可调用工具函数。
+version: v0.1.0
+author: SaltedDoubao
+repo: https://github.com/SaltedDoubao/astrbot_plugin_video_generate_tool
