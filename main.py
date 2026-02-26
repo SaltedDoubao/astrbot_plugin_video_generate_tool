@@ -180,7 +180,7 @@ class VideoGenerateToolPlugin(Star):
         model: str = "",
         duration: float = 0,
         aspect_ratio: str = "16:9",
-        wait: bool = True,
+        wait: bool = False,
         _: str = "",
     ) -> str:
         """调用视频服务生成视频，可由 AI 自动调用。
@@ -191,7 +191,7 @@ class VideoGenerateToolPlugin(Star):
             model(string): 模型名，留空使用服务商默认模型
             duration(number): 期望视频秒数，<=0 表示不传
             aspect_ratio(string): 宽高比，如 16:9
-            wait(boolean): 是否等待任务完成再返回
+            wait(boolean): 是否等待任务完成再返回（默认 false，避免工具调用超时）
             _(string): 内部保留参数，忽略
         """
         provider = self._resolve_provider(provider_id)
@@ -221,7 +221,13 @@ class VideoGenerateToolPlugin(Star):
                 f"task_id={submit_snapshot.task_id}, status={submit_snapshot.status}"
             )
 
-        final_snapshot = await self._wait_for_result(provider, submit_snapshot)
+        llm_wait_timeout = max(int(self._cfg_get("llm_wait_timeout_seconds", 10)), 1)
+        final_snapshot = await self._wait_for_result(
+            provider,
+            submit_snapshot,
+            max_wait_seconds=llm_wait_timeout,
+            swallow_cancel=True,
+        )
         await self._save_task(event, final_snapshot, prompt=prompt, model=model or provider.model)
 
         if self._is_failed(provider, final_snapshot):
@@ -241,7 +247,8 @@ class VideoGenerateToolPlugin(Star):
 
         return (
             "video_generate 等待超时或未完成: "
-            f"task_id={final_snapshot.task_id}, status={final_snapshot.status}"
+            f"task_id={final_snapshot.task_id}, status={final_snapshot.status}, "
+            f"llm_wait_timeout_seconds={llm_wait_timeout}"
         )
 
     @filter.llm_tool(name="video_query_status")
@@ -287,7 +294,13 @@ class VideoGenerateToolPlugin(Star):
         await self._client.close()
         logger.info("[video_generate_tool] 插件已卸载。")
 
-    async def _wait_for_result(self, provider: ProviderConfig, snapshot: TaskSnapshot) -> TaskSnapshot:
+    async def _wait_for_result(
+        self,
+        provider: ProviderConfig,
+        snapshot: TaskSnapshot,
+        max_wait_seconds: int | None = None,
+        swallow_cancel: bool = False,
+    ) -> TaskSnapshot:
         if self._is_terminal(provider, snapshot):
             return snapshot
 
@@ -299,10 +312,28 @@ class VideoGenerateToolPlugin(Star):
         attempts = max(int(self._cfg_get("max_poll_attempts", 20)), 1)
 
         latest = snapshot
+        started_at = time.monotonic()
         consecutive_errors = 0
         max_transient_errors = 3
         for attempt in range(attempts):
-            await asyncio.sleep(interval)
+            sleep_seconds = float(interval)
+            if max_wait_seconds is not None:
+                elapsed = time.monotonic() - started_at
+                remaining = float(max_wait_seconds) - elapsed
+                if remaining <= 0:
+                    self._debug_log(
+                        f"轮询达到等待预算上限: task_id={task_id}, "
+                        f"max_wait_seconds={max_wait_seconds}, status={latest.status}"
+                    )
+                    return latest
+                sleep_seconds = min(sleep_seconds, remaining)
+            try:
+                await asyncio.sleep(sleep_seconds)
+            except asyncio.CancelledError:
+                if swallow_cancel:
+                    self._debug_log(f"轮询被取消，返回当前状态: task_id={task_id}, status={latest.status}")
+                    return latest
+                raise
             self._debug_log(
                 f"轮询第 {attempt + 1}/{attempts} 次: task_id={task_id}, "
                 f"当前状态={latest.status or '(未知)'}"
