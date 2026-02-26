@@ -10,7 +10,12 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.star import Context, Star, register
 
-from video_api import ProviderConfig, TaskSnapshot, VideoApiClient, VideoApiError
+try:
+    # AstrBot 常见加载方式：package.module（需要相对导入）
+    from .video_api import ProviderConfig, TaskSnapshot, VideoApiClient, VideoApiError
+except ImportError:
+    # 兼容直接以脚本/顶层模块方式加载
+    from video_api import ProviderConfig, TaskSnapshot, VideoApiClient, VideoApiError
 
 try:
     from astrbot.api import AstrBotConfig
