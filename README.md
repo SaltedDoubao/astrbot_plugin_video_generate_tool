@@ -3,17 +3,19 @@
 面向 AstrBot 的视频生成插件：  
 - 支持通过可配置的 API 映射接入 veo / sora / grok / seedance 等视频服务。  
 - 支持 QQ 聊天内直接发起生成并回传视频（`Video` 组件 + URL 兜底）。  
-- 提供可被 AI 自动调用的工具函数（`video_generate`、`video_query_status`）。
+- 提供可被 AI 自动调用的工具函数（`video_generate`、`video_query_status`、`video_test_connection`）。
 
 ## 功能清单
 
 - 命令：
   - `/video providers`：列出可用服务商
+  - `/video test [provider_id]`：测试 API 连通性（`all` 表示测试全部）
   - `/video gen <provider_id> <prompt>`：提交并等待视频结果
   - `/video status [task_id]`：查状态（省略 task_id 时查当前会话最近任务）
 - AI 工具：
   - `video_generate(prompt, provider_id, model, duration, aspect_ratio, wait)`
   - `video_query_status(task_id)`
+  - `video_test_connection(provider_id)`
 - 结果输出：
   - 成功：发送视频组件（可用时）+ 文本
   - 失败：返回错误状态与错误详情
@@ -45,6 +47,8 @@
 ```
 
 如果某服务商不是 OpenAI 兼容格式，只要它具备“提交 + 查询”能力，也可以通过路径映射接入。
+
+说明：`video_generate` 的 `wait` 默认建议为 `false`。若传 `true`，将受 `llm_wait_timeout_seconds`（默认 10 秒）限制，超时后请用 `video_query_status` 继续查询。
 
 ## 依赖
 
