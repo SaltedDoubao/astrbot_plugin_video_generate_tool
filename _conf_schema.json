@@ -19,6 +19,11 @@
     "type": "int",
     "default": 20
   },
+  "llm_wait_timeout_seconds": {
+    "description": "LLM 工具 video_generate 在 wait=true 时的最长等待秒数，避免触发 Agent 工具超时（默认 60 秒）。",
+    "type": "int",
+    "default": 10
+  },
   "debug_mode": {
     "description": "调试模式开关。开启后将在日志中输出 HTTP 请求/响应详情、轮询过程等调试信息，排查接入问题时使用，正常运行时建议关闭。",
     "type": "bool",
@@ -35,7 +40,7 @@
           "provider_id": {
             "description": "服务商唯一 ID，例如 veo/sora/grok/seedance",
             "type": "string",
-            "default": "veo"
+            "default": ""
           },
           "base_url": {
             "description": "服务商 API 基础地址，例如 https://api.example.com",
