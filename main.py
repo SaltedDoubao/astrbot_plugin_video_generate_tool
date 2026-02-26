@@ -27,14 +27,15 @@ except Exception:  # pragma: no cover - 兼容旧版本类型导出
 @register("video_generate_tool", "SaltedDoubao", "多服务商视频生成工具", "0.1.0")
 class VideoGenerateToolPlugin(Star):
     _TASK_CACHE_MAX = 200
+    _debug = False
 
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.config = config or {}
+        self._debug = bool(self._cfg_get("debug_mode", False))
         self._task_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._providers = self._load_providers()
         timeout = float(self._cfg_get("request_timeout_seconds", 45))
-        self._debug = bool(self._cfg_get("debug_mode", False))
         self._client = VideoApiClient(timeout_seconds=max(timeout, 5.0), debug=self._debug)
 
     async def initialize(self):
@@ -45,7 +46,7 @@ class VideoGenerateToolPlugin(Star):
             logger.info("[video_generate_tool][DEBUG] 调试模式已开启")
 
     def _debug_log(self, msg: str) -> None:
-        if self._debug:
+        if bool(self.__dict__.get("_debug", False)):
             logger.info("[video_generate_tool][DEBUG] %s", msg)
 
     @filter.command_group("video")
