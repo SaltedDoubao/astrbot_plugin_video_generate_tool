@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import OrderedDict
 from typing import Any, Mapping
 
 import astrbot.api.message_components as Comp
@@ -25,18 +26,27 @@ except Exception:  # pragma: no cover - 兼容旧版本类型导出
 
 @register("video_generate_tool", "SaltedDoubao", "多服务商视频生成工具", "0.1.0")
 class VideoGenerateToolPlugin(Star):
+    _TASK_CACHE_MAX = 200
+
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
         self.config = config or {}
-        self._task_cache: dict[str, dict[str, Any]] = {}
+        self._task_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._providers = self._load_providers()
         timeout = float(self._cfg_get("request_timeout_seconds", 45))
-        self._client = VideoApiClient(timeout_seconds=max(timeout, 5.0))
+        self._debug = bool(self._cfg_get("debug_mode", False))
+        self._client = VideoApiClient(timeout_seconds=max(timeout, 5.0), debug=self._debug)
 
     async def initialize(self):
         logger.info(
             f"[video_generate_tool] 插件已加载，已配置服务商数量: {len(self._providers)}"
         )
+        if self._debug:
+            logger.info("[video_generate_tool][DEBUG] 调试模式已开启")
+
+    def _debug_log(self, msg: str) -> None:
+        if self._debug:
+            logger.info("[video_generate_tool][DEBUG] %s", msg)
 
     @filter.command_group("video")
     def video(self):
@@ -170,7 +180,8 @@ class VideoGenerateToolPlugin(Star):
         duration: float = 0,
         aspect_ratio: str = "16:9",
         wait: bool = True,
-    ) -> MessageEventResult:
+        _: str = "",
+    ) -> str:
         """调用视频服务生成视频，可由 AI 自动调用。
 
         Args:
@@ -180,17 +191,17 @@ class VideoGenerateToolPlugin(Star):
             duration(number): 期望视频秒数，<=0 表示不传
             aspect_ratio(string): 宽高比，如 16:9
             wait(boolean): 是否等待任务完成再返回
+            _(string): 内部保留参数，忽略
         """
         provider = self._resolve_provider(provider_id)
         if provider is None:
-            yield event.plain_result("video_generate 调用失败: provider_id 不存在或未配置。")
-            return
+            return "video_generate 调用失败: provider_id 不存在或未配置。"
 
         options: dict[str, Any] = {}
         if duration > 0:
-            options["duration"] = duration
+            options[provider.duration_field] = duration
         if aspect_ratio.strip():
-            options["aspect_ratio"] = aspect_ratio.strip()
+            options[provider.aspect_ratio_field] = aspect_ratio.strip()
 
         try:
             submit_snapshot = await self._client.submit(
@@ -201,37 +212,33 @@ class VideoGenerateToolPlugin(Star):
             )
             await self._save_task(event, submit_snapshot, prompt=prompt, model=model or provider.model)
         except VideoApiError as exc:
-            yield event.plain_result(f"video_generate 调用失败: {exc}")
-            return
+            return f"video_generate 调用失败: {exc}"
 
         if not wait:
-            yield event.plain_result(
+            return (
                 f"video_generate 已提交: provider={provider.provider_id}, "
                 f"task_id={submit_snapshot.task_id}, status={submit_snapshot.status}"
             )
-            return
 
         final_snapshot = await self._wait_for_result(provider, submit_snapshot)
         await self._save_task(event, final_snapshot, prompt=prompt, model=model or provider.model)
 
         if self._is_failed(provider, final_snapshot):
-            yield event.plain_result(
+            return (
                 "video_generate 任务失败: "
                 f"task_id={final_snapshot.task_id}, "
                 f"status={final_snapshot.status}, "
                 f"error={final_snapshot.error_message or '-'}"
             )
-            return
 
         if final_snapshot.video_url:
-            yield event.plain_result(
+            return (
                 "video_generate 任务完成: "
                 f"task_id={final_snapshot.task_id}, "
                 f"url={final_snapshot.video_url}"
             )
-            return
 
-        yield event.plain_result(
+        return (
             "video_generate 等待超时或未完成: "
             f"task_id={final_snapshot.task_id}, status={final_snapshot.status}"
         )
@@ -241,43 +248,42 @@ class VideoGenerateToolPlugin(Star):
         self,
         event: AstrMessageEvent,
         task_id: str,
-    ) -> MessageEventResult:
+        _: str = "",
+    ) -> str:
         """查询视频任务状态，可由 AI 自动调用。
 
         Args:
             task_id(string): 任务 ID
+            _(string): 内部保留参数，忽略
         """
         snapshot = await self._load_task(task_id)
         if snapshot is None:
-            yield event.plain_result(f"video_query_status: 未找到 task_id={task_id} 的本地记录。")
-            return
+            return f"video_query_status: 未找到 task_id={task_id} 的本地记录。"
 
         provider = self._providers.get(snapshot.provider_id)
         if provider is None:
-            yield event.plain_result(
+            return (
                 f"video_query_status: 服务商 `{snapshot.provider_id}` 未配置。"
             )
-            return
 
         try:
             latest = await self._client.query(provider=provider, task_id=task_id)
             await self._save_task(event, latest, prompt="", model=provider.model)
         except VideoApiError as exc:
-            yield event.plain_result(f"video_query_status 查询失败: {exc}")
-            return
+            return f"video_query_status 查询失败: {exc}"
 
         if latest.video_url:
-            yield event.plain_result(
+            return (
                 f"video_query_status: completed, task_id={task_id}, url={latest.video_url}"
             )
-            return
 
-        yield event.plain_result(
+        return (
             "video_query_status: "
             f"task_id={task_id}, status={latest.status}, error={latest.error_message or '-'}"
         )
 
     async def terminate(self):
+        await self._client.close()
         logger.info("[video_generate_tool] 插件已卸载。")
 
     async def _wait_for_result(self, provider: ProviderConfig, snapshot: TaskSnapshot) -> TaskSnapshot:
@@ -292,16 +298,34 @@ class VideoGenerateToolPlugin(Star):
         attempts = max(int(self._cfg_get("max_poll_attempts", 20)), 1)
 
         latest = snapshot
-        for _ in range(attempts):
+        consecutive_errors = 0
+        max_transient_errors = 3
+        for attempt in range(attempts):
             await asyncio.sleep(interval)
+            self._debug_log(
+                f"轮询第 {attempt + 1}/{attempts} 次: task_id={task_id}, "
+                f"当前状态={latest.status or '(未知)'}"
+            )
             try:
                 latest = await self._client.query(provider=provider, task_id=task_id)
+                consecutive_errors = 0
             except VideoApiError as exc:
-                latest.error_message = str(exc)
-                latest.status = latest.status or "error"
-                return latest
+                consecutive_errors += 1
+                self._debug_log(f"轮询出错 (连续第 {consecutive_errors} 次): {exc}")
+                if consecutive_errors >= max_transient_errors:
+                    return TaskSnapshot(
+                        provider_id=latest.provider_id,
+                        task_id=latest.task_id,
+                        status=latest.status or "error",
+                        video_url=latest.video_url,
+                        error_message=str(exc),
+                        raw=latest.raw,
+                    )
+                continue
             if self._is_terminal(provider, latest):
+                self._debug_log(f"任务已终态: status={latest.status}, video_url={'(有)' if latest.video_url else '(无)'}")
                 return latest
+        self._debug_log(f"轮询结束（已达最大次数 {attempts}）: task_id={task_id}, status={latest.status}")
         return latest
 
     def _is_terminal(self, provider: ProviderConfig, snapshot: TaskSnapshot) -> bool:
@@ -317,7 +341,10 @@ class VideoGenerateToolPlugin(Star):
         failed = {item.lower() for item in provider.failed_values}
         if status in failed:
             return True
-        return bool(snapshot.error_message and not snapshot.video_url)
+        # 仅在状态为终态（非进行中）时才通过 error_message 判断失败
+        done = {item.lower() for item in provider.done_values}
+        is_terminal_status = status in done or status in failed
+        return bool(is_terminal_status and snapshot.error_message and not snapshot.video_url)
 
     def _video_chain_result(
         self, event: AstrMessageEvent, text: str, video_url: str
@@ -339,6 +366,8 @@ class VideoGenerateToolPlugin(Star):
             return next(iter(self._providers.values()))
         return None
 
+    _VALID_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
+
     def _load_providers(self) -> dict[str, ProviderConfig]:
         result: dict[str, ProviderConfig] = {}
         providers = self._cfg_get("providers", [])
@@ -353,6 +382,19 @@ class VideoGenerateToolPlugin(Star):
             if not provider_id or not base_url:
                 continue
 
+            submit_method = str(item.get("submit_method", "POST")).strip().upper()
+            status_method = str(item.get("status_method", "GET")).strip().upper()
+            if submit_method not in self._VALID_HTTP_METHODS:
+                logger.warning(
+                    f"[video_generate_tool] 服务商 {provider_id} 的 submit_method '{submit_method}' 不合法，已跳过。"
+                )
+                continue
+            if status_method not in self._VALID_HTTP_METHODS:
+                logger.warning(
+                    f"[video_generate_tool] 服务商 {provider_id} 的 status_method '{status_method}' 不合法，已跳过。"
+                )
+                continue
+
             done_values = self._parse_csv(
                 str(item.get("done_values", "succeeded,completed,success,done,finished"))
             )
@@ -365,12 +407,12 @@ class VideoGenerateToolPlugin(Star):
                 base_url=base_url,
                 api_key=str(item.get("api_key", "")).strip(),
                 model=str(item.get("model", "")).strip(),
-                submit_path=str(item.get("submit_path", "/v1/video/generations")).strip(),
+                submit_path=str(item.get("submit_path", "/v1/videos")).strip(),
                 status_path_template=str(
-                    item.get("status_path_template", "/v1/video/generations/{task_id}")
+                    item.get("status_path_template", "/v1/videos/{task_id}")
                 ).strip(),
-                submit_method=str(item.get("submit_method", "POST")).strip().upper(),
-                status_method=str(item.get("status_method", "GET")).strip().upper(),
+                submit_method=submit_method,
+                status_method=status_method,
                 prompt_field=str(item.get("prompt_field", "prompt")).strip(),
                 model_field=str(item.get("model_field", "model")).strip(),
                 task_id_field=str(item.get("task_id_field", "id")).strip(),
@@ -385,8 +427,16 @@ class VideoGenerateToolPlugin(Star):
                 extra_body=self._parse_json_object(
                     item.get("extra_body_json", "{}"), f"{provider_id}.extra_body_json"
                 ),
+                status_request_id_field=str(item.get("status_request_id_field", "")).strip(),
+                duration_field=str(item.get("duration_field", "duration")).strip() or "duration",
+                aspect_ratio_field=str(item.get("aspect_ratio_field", "aspect_ratio")).strip() or "aspect_ratio",
             )
             result[provider_id] = config
+            self._debug_log(
+                f"加载服务商: id={provider_id}, base_url={base_url}, "
+                f"model={config.model or '(未设置)'}, submit={submit_method} {config.submit_path}, "
+                f"status={status_method} {config.status_path_template}"
+            )
         return result
 
     @staticmethod
@@ -437,6 +487,8 @@ class VideoGenerateToolPlugin(Star):
             "updated_at": now,
         }
         self._task_cache[snapshot.task_id] = record
+        while len(self._task_cache) > self._TASK_CACHE_MAX:
+            self._task_cache.popitem(last=False)
 
         await self._safe_put_kv(f"video_task:{snapshot.task_id}", record)
         await self._safe_put_kv(self._session_last_task_key(event), snapshot.task_id)
