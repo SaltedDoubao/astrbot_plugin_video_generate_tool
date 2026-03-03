@@ -492,8 +492,7 @@ class VideoGenerateToolPlugin(Star):
         try:
             base_dir = Path(StarTools.get_data_dir())
         except Exception as exc:
-            logger.warning(f"获取插件数据目录失败，将回退当前目录: {exc}")
-            base_dir = Path.cwd()
+            raise RuntimeError(f"获取插件持久化目录失败: {exc}") from exc
         cache_dir = base_dir / "video_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir
